@@ -33,8 +33,10 @@ python installer.py --target /path/to/Utility # install to a custom Resolve scri
 1. Open DaVinci Resolve.
 2. Go to **Workspace > Scripts > Utility > ResolveYTDL**.
 3. Paste a YouTube URL or another URL supported by `yt-dlp`.
-4. Choose a destination folder.
-5. Click **Download and Import**.
+4. Click **Load All Formats** to show the title, uploader/channel, and every `yt-dlp` format option reported for the URL.
+5. Paste a format id or any `yt-dlp` format expression into the format selector.
+6. Choose a destination folder.
+7. Click **Download and Import**.
 
 The downloaded file is imported into the current media pool when Resolve's scripting API is available.
 
@@ -46,3 +48,21 @@ At runtime, the plugin resolves `yt-dlp` in this order:
 2. The executable in the managed virtual environment.
 3. A newly bootstrapped managed virtual environment, if Python and pip are available.
 
+
+## Format selection and configuration
+
+ResolveYTDL does not create or pass a custom `yt-dlp` config file. Downloads and metadata probes use `yt-dlp`'s normal system/user configuration discovery, so existing config files, authentication settings, proxy settings, and defaults continue to apply.
+
+The default format selector is `bestvideo+bestaudio/best`. Use **Load All Formats** in Resolve, or run:
+
+```bash
+python plugin/resolve_ytdl.py --list-formats URL
+```
+
+Then pass any listed format id or expression with:
+
+```bash
+python plugin/resolve_ytdl.py -f FORMAT URL /path/to/downloads
+```
+
+The plugin logs backend selection, titles, uploader/channel names, selected format expressions, download progress, Resolve import status, and detailed errors in the Resolve window.
