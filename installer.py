@@ -12,6 +12,8 @@ from pathlib import Path
 
 APP_NAME = "ResolveYTDL"
 PLUGIN_SOURCE = Path(__file__).resolve().parent / "plugin" / "resolve_ytdl.py"
+SCRIPT_DESTINATION_NAME = "ResolveYTDL.py"
+LEGACY_SCRIPT_NAMES = ("ResolveYTDL.py", "resolve_ytdl.py", "Resolve YTDL.py", "YouTubeDL.py", "YTDL.py")
 
 
 def resolve_script_dir() -> Path:
@@ -63,7 +65,14 @@ def install_environment(upgrade_ytdlp: bool) -> None:
 
 def install_plugin(target: Path) -> Path:
     target.mkdir(parents=True, exist_ok=True)
-    destination = target / "ResolveYTDL.py"
+    destination = target / SCRIPT_DESTINATION_NAME
+    for legacy_name in LEGACY_SCRIPT_NAMES:
+        legacy_path = target / legacy_name
+        if legacy_path == destination:
+            continue
+        if legacy_path.exists():
+            legacy_path.unlink()
+            print(f"Removed old ResolveYTDL script: {legacy_path}")
     shutil.copy2(PLUGIN_SOURCE, destination)
     return destination
 

@@ -8,6 +8,8 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
+import urllib.request
 import sys
 import threading
 import venv
@@ -17,6 +19,8 @@ from typing import Any, Optional, Sequence
 APP_NAME = "ResolveYTDL"
 SCRIPT_TITLE = "ResolveYTDL"
 DEFAULT_FORMAT = "bestvideo+bestaudio/best"
+DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/Sampannakh/ResolveYTDL/main/plugin/resolve_ytdl.py"
+UPDATE_TIMEOUT_SECONDS = 5
 
 
 def data_dir() -> Path:
@@ -40,6 +44,55 @@ def venv_executable(name: str) -> Path:
     return venv_dir() / "bin" / name
 
 
+def update_url() -> str:
+    return os.environ.get("RESOLVEYTDL_UPDATE_URL", DEFAULT_UPDATE_URL)
+
+
+def internet_available(timeout: int = UPDATE_TIMEOUT_SECONDS) -> bool:
+    try:
+        request = urllib.request.Request("https://www.google.com/generate_204", method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return 200 <= response.status < 400
+    except Exception:
+        return False
+
+
+def auto_update_script(logger=print) -> bool:
+    """Replace this script with the latest published copy when internet is available."""
+    source = update_url()
+    current = Path(__file__).resolve()
+    if not source:
+        logger("Auto-update skipped: no update URL configured.")
+        return False
+    if not internet_available():
+        logger("Auto-update skipped: no internet connection detected.")
+        return False
+    try:
+        logger(f"Checking for ResolveYTDL script update: {source}")
+        request = urllib.request.Request(source, headers={"User-Agent": f"{APP_NAME}/self-update"})
+        with urllib.request.urlopen(request, timeout=UPDATE_TIMEOUT_SECONDS) as response:
+            latest = response.read()
+        current_bytes = current.read_bytes()
+        if latest == current_bytes:
+            logger("ResolveYTDL script is up to date.")
+            return False
+        text = latest.decode("utf-8")
+        if "APP_NAME = \"ResolveYTDL\"" not in text or "def run_resolve_ui" not in text:
+            logger("Auto-update skipped: downloaded file did not look like ResolveYTDL.")
+            return False
+        current_mode = current.stat().st_mode
+        fd, temp_name = tempfile.mkstemp(prefix=current.name, suffix=".tmp", dir=str(current.parent))
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(latest)
+        os.chmod(temp_name, current_mode)
+        os.replace(temp_name, current)
+        logger("ResolveYTDL script updated. Restart the script to use the new version.")
+        return True
+    except Exception as exc:
+        logger(f"Auto-update skipped: {exc}")
+        return False
+
+
 def resolve_ytdlp() -> Optional[Path]:
     """Prefer the user's system yt-dlp before the managed fallback environment."""
     system = shutil.which("yt-dlp")
@@ -52,7 +105,7 @@ def resolve_ytdlp() -> Optional[Path]:
 
 
 def ensure_environment() -> Path:
-    """Create the managed virtual environment and install yt-dlp if needed."""
+    """Create the managed virtual environment and install or update yt-dlp if needed."""
     existing = resolve_ytdlp()
     if existing and "ResolveYTDL" not in str(existing):
         return existing
@@ -94,8 +147,16 @@ def format_summary(fmt: dict[str, Any]) -> str:
 
 def list_formats(url: str, ytdlp: Path) -> tuple[dict[str, Any], list[str]]:
     info = run_ytdlp_json(url, ytdlp)
-    formats = info.get("formats") or []
-    lines = [format_summary(fmt) for fmt in formats]
+    command = [str(ytdlp), "--list-formats", "--no-playlist", url]
+    completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if completed.returncode == 0 and completed.stdout.strip():
+        lines = completed.stdout.rstrip().splitlines()
+    else:
+        formats = info.get("formats") or []
+        lines = [format_summary(fmt) for fmt in formats]
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip() or f"yt-dlp exited with status {completed.returncode}"
+            lines.insert(0, f"yt-dlp --list-formats failed; showing JSON formats instead: {detail}")
     if not lines:
         lines = ["No individual formats were reported; use the default selector or a yt-dlp format expression."]
     return info, lines
@@ -146,6 +207,7 @@ def run_cli(argv: Sequence[str]) -> int:
     if not args.url:
         parser.print_usage()
         return 2
+    auto_update_script()
     ytdlp = resolve_ytdlp() or ensure_environment()
     print(f"Using yt-dlp: {ytdlp}")
     if args.list_formats:
@@ -231,6 +293,8 @@ def run_resolve_ui() -> None:
                 log("Download finished, but no new file was detected in the destination folder.")
         except Exception as exc:  # Resolve UI callbacks need visible error reporting.
             log(f"Error downloading: {exc}")
+
+    threading.Thread(target=auto_update_script, args=(lambda message: log(message),), daemon=True).start()
 
     window.On.ResolveYTDL.Close = lambda ev: dispatcher.ExitLoop()
     window.On.close.Clicked = lambda ev: dispatcher.ExitLoop()
