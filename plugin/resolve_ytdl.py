@@ -19,6 +19,7 @@ from typing import Any, Optional, Sequence
 APP_NAME = "ResolveYTDL"
 SCRIPT_TITLE = "ResolveYTDL"
 DEFAULT_FORMAT = "bestvideo+bestaudio/best"
+MAX_UI_FORMAT_BUTTONS = 80
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/Sampannakh/ResolveYTDL/main/plugin/resolve_ytdl.py"
 UPDATE_TIMEOUT_SECONDS = 5
 
@@ -162,6 +163,19 @@ def list_formats(url: str, ytdlp: Path) -> tuple[dict[str, Any], list[str]]:
     return info, lines
 
 
+def selectable_formats(info: dict[str, Any]) -> list[tuple[str, str]]:
+    choices = [(DEFAULT_FORMAT, "Best available (video + audio)")]
+    seen = {DEFAULT_FORMAT}
+    for fmt in info.get("formats") or []:
+        selector = str(fmt.get("format_id") or "").strip()
+        if not selector or selector in seen:
+            continue
+        label = format_summary(fmt)
+        choices.append((selector, label))
+        seen.add(selector)
+    return choices
+
+
 def download(url: str, destination: Path, ytdlp: Path, format_selector: str = DEFAULT_FORMAT, logger=print) -> Optional[Path]:
     destination.mkdir(parents=True, exist_ok=True)
     before = set(destination.glob("*"))
@@ -235,19 +249,23 @@ def run_resolve_ui() -> None:
                 [
                     ui.Label({"Text": "URL"}),
                     ui.LineEdit({"ID": "url", "PlaceholderText": "https://www.youtube.com/watch?v=..."}),
-                    ui.Label({"Text": "Format selector (load formats, then paste any format id or yt-dlp expression)"}),
-                    ui.LineEdit({"ID": "format", "Text": DEFAULT_FORMAT}),
                     ui.Label({"ID": "title", "Text": "Title: not loaded"}),
                     ui.Label({"ID": "message", "Text": "Status: idle"}),
                     ui.Label({"Text": "Destination folder"}),
                     ui.LineEdit({"ID": "destination", "Text": default_dest}),
-                    ui.HGroup({"Spacing": 8}, [ui.Button({"ID": "formats", "Text": "Load All Formats"}), ui.Button({"ID": "download", "Text": "Download and Import"}), ui.Button({"ID": "close", "Text": "Close"})]),
+                    ui.HGroup({"Spacing": 8}, [ui.Button({"ID": "formats", "Text": "Load All Formats"}), ui.Button({"ID": "close", "Text": "Close"})]),
+                    ui.Label({"Text": "Formats (click one to download and import)"}),
+                    ui.VGroup(
+                        {"ID": "format_buttons", "Spacing": 4},
+                        [ui.Button({"ID": f"format_{index}", "Text": "", "Visible": False}) for index in range(MAX_UI_FORMAT_BUTTONS)],
+                    ),
                     ui.TextEdit({"ID": "log", "ReadOnly": True}),
                 ],
             )
         ],
     )
     items = window.GetItems()
+    format_choices: list[tuple[str, str]] = []
 
     def log(message: str) -> None:
         items["log"].PlainText = (items["log"].PlainText + message + "\n")[-20000:]
@@ -255,6 +273,17 @@ def run_resolve_ui() -> None:
 
     def current_url() -> str:
         return items["url"].Text.strip()
+
+    def show_format_buttons(choices: list[tuple[str, str]]) -> None:
+        for index in range(MAX_UI_FORMAT_BUTTONS):
+            button = items[f"format_{index}"]
+            if index < len(choices):
+                selector, label = choices[index]
+                button.Text = f"Download {selector}: {label}"[:220]
+                button.Visible = True
+            else:
+                button.Text = ""
+                button.Visible = False
 
     def load_formats_worker() -> None:
         try:
@@ -268,20 +297,30 @@ def run_resolve_ui() -> None:
             items["title"].Text = f"Title: {info.get('title', 'unknown')}"
             uploader = info.get("uploader") or info.get("channel") or "unknown"
             log(f"Uploader/channel: {uploader}")
-            log("Available formats (copy a format id into the selector, or use any yt-dlp format expression):")
-            for line in lines:
-                log(line)
-            log("Format list loaded.")
+            format_choices[:] = selectable_formats(info)[:MAX_UI_FORMAT_BUTTONS]
+            show_format_buttons(format_choices)
+            log("Available formats loaded as download buttons:")
+            for selector, label in format_choices:
+                log(f"{selector}: {label}")
+            if len(selectable_formats(info)) > MAX_UI_FORMAT_BUTTONS:
+                log(f"Showing the first {MAX_UI_FORMAT_BUTTONS} formats only.")
+            if not format_choices:
+                log("No downloadable formats were found.")
+            else:
+                log("Click a format button to download and import it.")
+            if lines:
+                log("Raw yt-dlp format list:")
+                for line in lines:
+                    log(line)
         except Exception as exc:  # Resolve UI callbacks need visible error reporting.
             log(f"Error loading formats: {exc}")
 
-    def download_worker() -> None:
+    def download_worker(selector: str) -> None:
         try:
             url = current_url()
             if not url:
                 log("Enter a URL before downloading.")
                 return
-            selector = items["format"].Text.strip() or DEFAULT_FORMAT
             ytdlp = resolve_ytdlp() or ensure_environment()
             log(f"Using yt-dlp: {ytdlp}")
             log(f"Selected format: {selector}")
@@ -299,7 +338,18 @@ def run_resolve_ui() -> None:
     window.On.ResolveYTDL.Close = lambda ev: dispatcher.ExitLoop()
     window.On.close.Clicked = lambda ev: dispatcher.ExitLoop()
     window.On.formats.Clicked = lambda ev: threading.Thread(target=load_formats_worker, daemon=True).start()
-    window.On.download.Clicked = lambda ev: threading.Thread(target=download_worker, daemon=True).start()
+    for index in range(MAX_UI_FORMAT_BUTTONS):
+        def make_handler(button_index: int):
+            def handler(ev):
+                if button_index >= len(format_choices):
+                    log("Load formats before choosing a download button.")
+                    return
+                selector = format_choices[button_index][0]
+                threading.Thread(target=download_worker, args=(selector,), daemon=True).start()
+
+            return handler
+
+        getattr(window.On, f"format_{index}").Clicked = make_handler(index)
     window.Show()
     dispatcher.RunLoop()
     window.Hide()
