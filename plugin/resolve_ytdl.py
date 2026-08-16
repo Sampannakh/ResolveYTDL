@@ -60,6 +60,9 @@ def internet_available(timeout: int = UPDATE_TIMEOUT_SECONDS) -> bool:
 
 def auto_update_script(logger=print) -> bool:
     """Replace this script with the latest published copy when internet is available."""
+    if os.environ.get("RESOLVEYTDL_NO_UPDATE"):
+        logger("Auto-update skipped: disabled for this session (RESOLVEYTDL_NO_UPDATE is set).")
+        return False
     source = update_url()
     current = Path(__file__).resolve()
     if not source:
@@ -105,12 +108,8 @@ def resolve_ytdlp() -> Optional[Path]:
     return None
 
 
-def ensure_environment() -> Path:
-    """Create the managed virtual environment and install or update yt-dlp if needed."""
-    existing = resolve_ytdlp()
-    if existing and "ResolveYTDL" not in str(existing):
-        return existing
-
+def ensure_managed_ytdlp() -> Path:
+    """Create the managed virtual environment and install/upgrade yt-dlp in it."""
     env = venv_dir()
     env.mkdir(parents=True, exist_ok=True)
     if not venv_executable("python").exists():
@@ -122,6 +121,26 @@ def ensure_environment() -> Path:
     if not ytdlp.exists():
         raise RuntimeError("yt-dlp was installed, but its executable could not be found")
     return ytdlp
+
+
+def get_ytdlp() -> Path:
+    """Resolve a yt-dlp executable, preferring a system install."""
+    return resolve_ytdlp() or ensure_managed_ytdlp()
+
+
+def run_with_ytdlp(action, logger=print):
+    """Call action(ytdlp_path), retrying once against a freshly upgraded
+    managed yt-dlp if the first attempt fails (e.g. a stale system install
+    that no longer works against the site)."""
+    ytdlp = get_ytdlp()
+    try:
+        return action(ytdlp), ytdlp
+    except RuntimeError as exc:
+        if ytdlp == venv_executable("yt-dlp"):
+            raise
+        logger(f"{ytdlp} failed ({exc}); retrying with a freshly updated managed yt-dlp.")
+        ytdlp = ensure_managed_ytdlp()
+        return action(ytdlp), ytdlp
 
 
 def run_ytdlp_json(url: str, ytdlp: Path) -> dict[str, Any]:
@@ -217,21 +236,25 @@ def run_cli(argv: Sequence[str]) -> int:
     parser.add_argument("destination", nargs="?", type=Path, default=data_dir() / "downloads", help="Download destination")
     parser.add_argument("-f", "--format", default=DEFAULT_FORMAT, help="yt-dlp format id or expression")
     parser.add_argument("--list-formats", action="store_true", help="Print all available formats and exit")
+    parser.add_argument("--no-update", action="store_true", help="Skip the self-update check for this run")
     args = parser.parse_args(argv[1:])
     if not args.url:
         parser.print_usage()
         return 2
+    if args.no_update:
+        os.environ["RESOLVEYTDL_NO_UPDATE"] = "1"
     auto_update_script()
-    ytdlp = resolve_ytdlp() or ensure_environment()
-    print(f"Using yt-dlp: {ytdlp}")
     if args.list_formats:
-        info, lines = list_formats(args.url, ytdlp)
+        (info, lines), ytdlp = run_with_ytdlp(lambda ytdlp: list_formats(args.url, ytdlp))
+        print(f"Using yt-dlp: {ytdlp}")
         print(f"Title: {info.get('title', 'unknown')}")
         print(f"Uploader: {info.get('uploader') or info.get('channel') or 'unknown'}")
         print("Available formats:")
         print("\n".join(lines))
         return 0
-    downloaded = download(args.url, args.destination.expanduser(), ytdlp, args.format)
+    destination = args.destination.expanduser()
+    downloaded, ytdlp = run_with_ytdlp(lambda ytdlp: download(args.url, destination, ytdlp, args.format))
+    print(f"Using yt-dlp: {ytdlp}")
     if downloaded:
         print(f"Downloaded: {downloaded}")
     return 0
@@ -291,9 +314,8 @@ def run_resolve_ui() -> None:
             if not url:
                 log("Enter a URL before loading formats.")
                 return
-            ytdlp = resolve_ytdlp() or ensure_environment()
+            (info, lines), ytdlp = run_with_ytdlp(lambda ytdlp: list_formats(url, ytdlp), log)
             log(f"Using yt-dlp: {ytdlp}")
-            info, lines = list_formats(url, ytdlp)
             items["title"].Text = f"Title: {info.get('title', 'unknown')}"
             uploader = info.get("uploader") or info.get("channel") or "unknown"
             log(f"Uploader/channel: {uploader}")
@@ -321,10 +343,12 @@ def run_resolve_ui() -> None:
             if not url:
                 log("Enter a URL before downloading.")
                 return
-            ytdlp = resolve_ytdlp() or ensure_environment()
-            log(f"Using yt-dlp: {ytdlp}")
             log(f"Selected format: {selector}")
-            downloaded = download(url, Path(items["destination"].Text).expanduser(), ytdlp, selector, log)
+            destination = Path(items["destination"].Text).expanduser()
+            downloaded, ytdlp = run_with_ytdlp(
+                lambda ytdlp: download(url, destination, ytdlp, selector, log), log
+            )
+            log(f"Using yt-dlp: {ytdlp}")
             if downloaded:
                 import_into_resolve(downloaded, log)
                 log(f"Done: {downloaded}")
