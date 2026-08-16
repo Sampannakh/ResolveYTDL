@@ -97,6 +97,20 @@ def auto_update_script(logger=print) -> bool:
         return False
 
 
+def script_version() -> str:
+    """Short git commit id of the running copy of this script, if known."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
 def resolve_ytdlp() -> Optional[Path]:
     """Prefer the user's system yt-dlp before the managed fallback environment."""
     system = shutil.which("yt-dlp")
@@ -108,38 +122,46 @@ def resolve_ytdlp() -> Optional[Path]:
     return None
 
 
-def ensure_managed_ytdlp() -> Path:
+def ensure_managed_ytdlp(logger=print) -> Path:
     """Create the managed virtual environment and install/upgrade yt-dlp in it."""
     env = venv_dir()
     env.mkdir(parents=True, exist_ok=True)
     if not venv_executable("python").exists():
+        logger(f"Creating managed virtual environment: {env}")
         venv.EnvBuilder(with_pip=True, clear=False).create(env)
 
     python = venv_executable("python")
-    subprocess.check_call([str(python), "-m", "pip", "install", "--upgrade", "pip", "yt-dlp"])
+    command = [str(python), "-m", "pip", "install", "--upgrade", "pip", "yt-dlp"]
+    logger("Installing/upgrading managed yt-dlp...")
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    assert process.stdout is not None
+    for line in process.stdout:
+        logger(line.rstrip())
+    if process.wait() != 0:
+        raise RuntimeError(f"Failed to install managed yt-dlp (pip exited with status {process.returncode})")
     ytdlp = venv_executable("yt-dlp")
     if not ytdlp.exists():
         raise RuntimeError("yt-dlp was installed, but its executable could not be found")
     return ytdlp
 
 
-def get_ytdlp() -> Path:
+def get_ytdlp(logger=print) -> Path:
     """Resolve a yt-dlp executable, preferring a system install."""
-    return resolve_ytdlp() or ensure_managed_ytdlp()
+    return resolve_ytdlp() or ensure_managed_ytdlp(logger)
 
 
 def run_with_ytdlp(action, logger=print):
     """Call action(ytdlp_path), retrying once against a freshly upgraded
     managed yt-dlp if the first attempt fails (e.g. a stale system install
     that no longer works against the site)."""
-    ytdlp = get_ytdlp()
+    ytdlp = get_ytdlp(logger)
     try:
         return action(ytdlp), ytdlp
     except RuntimeError as exc:
         if ytdlp == venv_executable("yt-dlp"):
             raise
         logger(f"{ytdlp} failed ({exc}); retrying with a freshly updated managed yt-dlp.")
-        ytdlp = ensure_managed_ytdlp()
+        ytdlp = ensure_managed_ytdlp(logger)
         return action(ytdlp), ytdlp
 
 
@@ -232,6 +254,7 @@ def import_into_resolve(path: Path, logger=print) -> None:
 
 def run_cli(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Download a yt-dlp-supported URL and optionally import it in Resolve")
+    parser.add_argument("--version", action="version", version=f"{SCRIPT_TITLE} {script_version()}")
     parser.add_argument("url", nargs="?", help="YouTube or other yt-dlp-supported URL")
     parser.add_argument("destination", nargs="?", type=Path, default=data_dir() / "downloads", help="Download destination")
     parser.add_argument("-f", "--format", default=DEFAULT_FORMAT, help="yt-dlp format id or expression")
@@ -264,12 +287,14 @@ def run_resolve_ui() -> None:
     ui = fusion.UIManager  # type: ignore[name-defined]
     dispatcher = bmd.UIDispatcher(ui)  # type: ignore[name-defined]
     default_dest = str(data_dir() / "downloads")
+    version = script_version()
     window = dispatcher.AddWindow(
-        {"WindowTitle": SCRIPT_TITLE, "ID": "ResolveYTDL", "Geometry": [100, 100, 820, 560]},
+        {"WindowTitle": f"{SCRIPT_TITLE} ({version})", "ID": "ResolveYTDL", "Geometry": [100, 100, 820, 560]},
         [
             ui.VGroup(
                 {"Spacing": 8},
                 [
+                    ui.Label({"Text": f"{SCRIPT_TITLE} version {version}"}),
                     ui.Label({"Text": "URL"}),
                     ui.LineEdit({"ID": "url", "PlaceholderText": "https://www.youtube.com/watch?v=..."}),
                     ui.Label({"ID": "title", "Text": "Title: not loaded"}),
